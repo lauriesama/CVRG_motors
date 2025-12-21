@@ -1,0 +1,4 @@
+moteus
+pyserial
+matplotlib
+numpy
