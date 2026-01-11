@@ -1,1 +1,1 @@
-# Motor Testing for Computer Vision and Robotics Group Lab at Ualberta.
+# Motor Testing for Computer Vision and Robotics Group at Ualberta
