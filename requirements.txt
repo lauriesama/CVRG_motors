@@ -2,3 +2,4 @@ moteus
 pyserial
 matplotlib
 numpy
+moteus-gui
