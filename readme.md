@@ -32,3 +32,5 @@ Note the replication tab for more information about how to replicate the experim
 This was made operating with the moteus python API found here. I HIGHLY recommend reading through mjbots.github.io. It contains a lot of information about the motor e.g. pinouts.
 
 https://mjbots.github.io/moteus/reference/python/
+
+## All tests were done with the moteus-c1.
