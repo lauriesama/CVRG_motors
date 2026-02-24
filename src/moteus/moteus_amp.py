@@ -9,20 +9,22 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 async def main():
-    CONTROLLER_ID = 3
-    DESIRED_MAX_CURRENT = 7  # Amps
+    CONTROLLER_ID = 1
+    DESIRED_MAX_CURRENT = 7 # Amps
+    DURATION = 5
     
     # Motor constants from calibration
-    MOTOR_KV = 21.67  # RPM/V
+    MOTOR_KT_GL40 = 67.95806766863022  # RPM/V
+    MOTOR_KT_GL60 = 21.672020187243888
+    MOTOR_KV = MOTOR_KT_GL60
     
     # Derive Kt from Kv
     # Kv is in RPM/V, Kt is in Nm/A
     # They are inversely related: Kt = 1/Kv when converted to consistent units
     # Kt [Nm/A] = 60 / (2 * π * Kv[RPM/V])
-    MOTOR_KT = 60 / (2 * math.pi * MOTOR_KV)  # ≈ 0.441 Nm/A
+    MOTOR_KT = 60 / (2 * math.pi * MOTOR_KV)
     
     HOLD_TORQUE = DESIRED_MAX_CURRENT * MOTOR_KT  # Convert amps to Nm
-    DURATION = 7
     
     # Query resolution to request current, voltage, power, and temperature values
     query_resolution = moteus.QueryResolution()
@@ -52,14 +54,9 @@ async def main():
     # Create timestamp for all files
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Create CSV file for logging
-    csv_filename = f"{timestamp}_current_log.csv"
-    csv_file = open(csv_filename, 'w', newline='')
-    csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['time_s', 'duty_cycle', 'motor_voltage_v', 'bus_voltage_v', 
-                         'current_a', 'torque_nm', 'motor_temperature_c', 'controller_temperature_c', 
-                         'position', 'power_w', 'mode', 'fault'])
-    print(f"Logging to: {csv_filename}\n")
+    # Prepare CSV filename (will be created later if user wants to save)
+    csv_filename = f"{timestamp}_{DESIRED_MAX_CURRENT}A_current_log.csv"
+    print(f"Will log to: {csv_filename} (if saved)\n")
     
     # Lists to store measurements
     torque_readings = []
@@ -69,6 +66,11 @@ async def main():
     controller_temperature_readings = []
     time_log = []
     duty_cycle_log = []
+    bus_voltage_log = []
+    position_log = []
+    power_log = []
+    mode_log = []
+    fault_log = []
     
     end_time = asyncio.get_event_loop().time() + DURATION
     start_time = asyncio.get_event_loop().time()
@@ -105,26 +107,16 @@ async def main():
         motor_temperature_readings.append(motor_temperature)
         controller_temperature_readings.append(controller_temperature)
         
-        # Log to CSV with full fidelity
+        # Store all data in memory
         elapsed_time = asyncio.get_event_loop().time() - start_time
         time_log.append(elapsed_time)
         duty_cycle_log.append(duty_cycle)
-        
+        bus_voltage_log.append(bus_voltage)
         current_pos = state.values[moteus.Register.POSITION]
-        csv_writer.writerow([
-            f"{elapsed_time:.4f}",
-            f"{duty_cycle:.6f}",
-            f"{motor_voltage:.4f}",
-            f"{bus_voltage:.4f}",
-            f"{q_current:.4f}",
-            f"{torque:.4f}",
-            f"{motor_temperature:.4f}",
-            f"{controller_temperature:.4f}",
-            f"{current_pos:.6f}",
-            f"{power:.4f}",
-            f"{mode}",
-            f"{fault}"
-        ])
+        position_log.append(current_pos)
+        power_log.append(power)
+        mode_log.append(mode)
+        fault_log.append(fault)
         
         if asyncio.get_event_loop().time() - last_print > 0.5:
             error = target_position - current_pos
@@ -136,12 +128,8 @@ async def main():
             last_print = asyncio.get_event_loop().time()
         
     
-    # Close CSV file
-    csv_file.close()
-    
     await controller.set_stop()
-    print("Done!")
-    print(f"Data saved to: {csv_filename}")
+    print("\nTest complete!")
     
     # Calculate and display peaks
     total_samples = len(time_log)
@@ -191,29 +179,67 @@ async def main():
     for line in summary_text:
         print(line)
     
-    # Save summary to file
-    summary_filename = f"{timestamp}_summary.txt"
-    with open(summary_filename, 'w') as summary_file:
-        summary_file.write('\n'.join(summary_text))
-    print(f"\nSummary saved to: {summary_filename}")
+    # Ask user if they want to save the data
+    print("\n" + "=" * 60)
+    save_response = input("Save data files? (y/enter to save, n to discard): ").strip().lower()
     
-    # Generate current plot
-    print("\nGenerating current plot...")
-    plt.figure(figsize=(12, 6))
-    plt.plot(time_log, current_readings, linewidth=0.8, color='blue')
-    plt.xlabel('Time (s)', fontsize=12)
-    plt.ylabel('Q-axis Current (A)', fontsize=12)
-    plt.title(f'Motor Q-axis Current Over Time - {DESIRED_MAX_CURRENT}A Hold Test', fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.axhline(y=DESIRED_MAX_CURRENT, color='r', linestyle='--', linewidth=1, label=f'Target: {DESIRED_MAX_CURRENT}A')
-    plt.legend()
-    plt.tight_layout()
-    
-    # Save plot
-    plot_filename = f"{timestamp}_current_plot.png"
-    plt.savefig(plot_filename, dpi=150)
-    print(f"Plot saved to: {plot_filename}")
-    plt.close()
+    if save_response == '' or save_response == 'y' or save_response == 'yes':
+        # Create and write CSV file
+        csv_file = open(csv_filename, 'w', newline='')
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(['time_s', 'duty_cycle', 'motor_voltage_v', 'bus_voltage_v', 
+                             'current_a', 'torque_nm', 'motor_temperature_c', 'controller_temperature_c', 
+                             'position', 'power_w', 'mode', 'fault'])
+        
+        # Write all stored data to CSV
+        for i in range(len(time_log)):
+            csv_writer.writerow([
+                f"{time_log[i]:.4f}",
+                f"{duty_cycle_log[i]:.6f}",
+                f"{motor_voltage_readings[i]:.4f}",
+                f"{bus_voltage_log[i]:.4f}",
+                f"{current_readings[i]:.4f}",
+                f"{torque_readings[i]:.4f}",
+                f"{motor_temperature_readings[i]:.4f}",
+                f"{controller_temperature_readings[i]:.4f}",
+                f"{position_log[i]:.6f}",
+                f"{power_log[i]:.4f}",
+                f"{mode_log[i]}",
+                f"{fault_log[i]}"
+            ])
+        csv_file.close()
+        print(f"CSV saved to: {csv_filename}")
+        
+        # Save summary to file
+        summary_filename = f"{timestamp}_{DESIRED_MAX_CURRENT}A_summary.txt"
+        with open(summary_filename, 'w') as summary_file:
+            summary_file.write('\n'.join(summary_text))
+        print(f"Summary saved to: {summary_filename}")
+        
+        # Generate current plot
+        print("Generating current plot...")
+        plt.figure(figsize=(12, 6))
+        plt.plot(time_log, current_readings, linewidth=0.8, color='blue')
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('Q-axis Current (A)', fontsize=12)
+        plt.title(f'Motor Q-axis Current Over Time - {DESIRED_MAX_CURRENT}A Hold Test', fontsize=14)
+        plt.grid(True, alpha=0.3)
+        plt.axhline(y=DESIRED_MAX_CURRENT, color='r', linestyle='--', linewidth=1, label=f'Target: {DESIRED_MAX_CURRENT}A')
+        plt.legend()
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f"{timestamp}_{DESIRED_MAX_CURRENT}A_current_plot.png"
+        plt.savefig(plot_filename, dpi=150)
+        print(f"Plot saved to: {plot_filename}")
+        plt.close()
+        
+        print(f"\nAll data saved:")
+        print(f"  - CSV: {csv_filename}")
+        print(f"  - Summary: {summary_filename}")
+        print(f"  - Plot: {plot_filename}")
+    else:
+        print("Data discarded. No files saved.")
 
 if __name__ == "__main__":
     asyncio.run(main())
