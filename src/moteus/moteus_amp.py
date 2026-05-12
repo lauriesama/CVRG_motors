@@ -9,14 +9,15 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 async def main():
-    CONTROLLER_ID = 1
-    DESIRED_MAX_CURRENT = 7 # Amps
+    CONTROLLER_ID = 4
+    DESIRED_MAX_CURRENT = 5 # Amps
     DURATION = 5
     
     # Motor constants from calibration
-    MOTOR_KT_GL40 = 67.95806766863022  # RPM/V
-    MOTOR_KT_GL60 = 21.672020187243888
-    MOTOR_KV = MOTOR_KT_GL60
+    MOTOR_KV_GL40 = 67.95806766863022  # RPM/V
+    MOTOR_KV_GL60 = 21.672020187243888
+    MOTOR_KV_GB54 = 24.969311585188652
+    MOTOR_KV = MOTOR_KV_GB54
     
     # Derive Kt from Kv
     # Kv is in RPM/V, Kt is in Nm/A
@@ -62,6 +63,7 @@ async def main():
     torque_readings = []
     current_readings = []
     motor_voltage_readings = []
+    bemf_readings = []  # New list for BEMF values
     motor_temperature_readings = []
     controller_temperature_readings = []
     time_log = []
@@ -84,8 +86,8 @@ async def main():
         )
         
         # Collect measurements
-        torque = state.values[moteus.Register.TORQUE]
-        q_current = state.values.get(moteus.Register.Q_CURRENT, 0.0)
+        torque = abs(state.values[moteus.Register.TORQUE])
+        q_current = abs(state.values.get(moteus.Register.Q_CURRENT, 0.0))
         bus_voltage = state.values.get(moteus.Register.VOLTAGE, 0.0)
         power = state.values.get(moteus.Register.POWER, 0.0)
         motor_temperature = state.values.get(moteus.Register.MOTOR_TEMPERATURE, 0.0)
@@ -100,6 +102,20 @@ async def main():
         else:
             motor_voltage = 0.0
             duty_cycle = 0.0
+        
+        # Calculate BEMF (Back Electromotive Force)
+        velocity = state.values.get(moteus.Register.VELOCITY, 0.0)  # Velocity in rotations/sec
+        bemf = velocity * MOTOR_KV / 60  # Convert to voltage using Kv (RPM/V)
+        bemf_readings.append(bemf)
+        
+        # Calculate the sum of BEMF and voltage drop across motor's internal resistance
+        resistance = 15  # Example resistance value in ohms, replace with actual motor resistance
+        voltage_drop = q_current * resistance
+        total_voltage_required = bemf + voltage_drop
+
+        # Check if supply voltage is sufficient
+        if total_voltage_required > bus_voltage:
+            print("Warning: Supply voltage is too low to maintain the desired current and torque.")
         
         torque_readings.append(torque)
         current_readings.append(q_current)
@@ -123,7 +139,7 @@ async def main():
             print(f"Pos: {current_pos:.3f} | Error: {error:.4f} | "
                   f"Torque: {torque:.2f}Nm | Q: {q_current:.2f}A | "
                   f"V_motor: {motor_voltage:.1f}V | Duty: {duty_cycle*100:.1f}% | "
-                  f"Temp M: {motor_temperature:.1f}°C | Temp C: {controller_temperature:.1f}°C | "
+                  f"BEMF: {bemf:.2f}V | Temp M: {motor_temperature:.1f}°C | Temp C: {controller_temperature:.1f}°C | "
                   f"Mode: {mode} | Fault: {fault}")
             last_print = asyncio.get_event_loop().time()
         
@@ -160,6 +176,8 @@ async def main():
     summary_text.append(f"  Average Current:         {sum(current_readings)/len(current_readings):.3f} A")
     summary_text.append(f"  Peak Duty Cycle:         {max(duty_cycle_log)*100:.1f} %")
     summary_text.append(f"  Average Duty Cycle:      {sum(duty_cycle_log)/len(duty_cycle_log)*100:.1f} %")
+    summary_text.append(f"  Peak BEMF:              {max(bemf_readings):.2f} V")
+    summary_text.append(f"  Average BEMF:           {sum(bemf_readings)/len(bemf_readings):.2f} V")
     summary_text.append("")
     summary_text.append(f"Torque Performance:")
     summary_text.append(f"  Peak Torque:             {max(torque_readings):.3f} Nm")
@@ -189,7 +207,7 @@ async def main():
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(['time_s', 'duty_cycle', 'motor_voltage_v', 'bus_voltage_v', 
                              'current_a', 'torque_nm', 'motor_temperature_c', 'controller_temperature_c', 
-                             'position', 'power_w', 'mode', 'fault'])
+                             'position', 'power_w', 'mode', 'fault', 'bemf_v'])  # Add BEMF column
         
         # Write all stored data to CSV
         for i in range(len(time_log)):
@@ -205,7 +223,8 @@ async def main():
                 f"{position_log[i]:.6f}",
                 f"{power_log[i]:.4f}",
                 f"{mode_log[i]}",
-                f"{fault_log[i]}"
+                f"{fault_log[i]}",
+                f"{bemf_readings[i]:.4f}"  # Add BEMF to CSV
             ])
         csv_file.close()
         print(f"CSV saved to: {csv_filename}")
@@ -219,12 +238,12 @@ async def main():
         # Generate current plot
         print("Generating current plot...")
         plt.figure(figsize=(12, 6))
-        plt.plot(time_log, current_readings, linewidth=0.8, color='blue')
+        plt.plot(time_log, current_readings, linewidth=0.8, color='blue', label='Q-axis Current (A)')
         plt.xlabel('Time (s)', fontsize=12)
-        plt.ylabel('Q-axis Current (A)', fontsize=12)
+        plt.ylabel('Current (A)', fontsize=12)
         plt.title(f'Motor Q-axis Current Over Time - {DESIRED_MAX_CURRENT}A Hold Test', fontsize=14)
         plt.grid(True, alpha=0.3)
-        plt.axhline(y=DESIRED_MAX_CURRENT, color='r', linestyle='--', linewidth=1, label=f'Target: {DESIRED_MAX_CURRENT}A')
+        plt.axhline(y=DESIRED_MAX_CURRENT, color='r', linestyle='--', linewidth=1, label=f'Target Current: {DESIRED_MAX_CURRENT}A')
         plt.legend()
         plt.tight_layout()
         
@@ -234,10 +253,46 @@ async def main():
         print(f"Plot saved to: {plot_filename}")
         plt.close()
         
+        # Generate BEMF plot
+        print("Generating BEMF plot...")
+        plt.figure(figsize=(12, 6))
+        plt.plot(time_log, bemf_readings, linewidth=0.8, color='green')
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('BEMF (V)', fontsize=12)
+        plt.title(f'Back EMF Over Time - {DESIRED_MAX_CURRENT}A Hold Test', fontsize=14)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # Save BEMF plot
+        bemf_plot_filename = f"{timestamp}_{DESIRED_MAX_CURRENT}A_bemf_plot.png"
+        plt.savefig(bemf_plot_filename, dpi=150)
+        print(f"BEMF Plot saved to: {bemf_plot_filename}")
+        plt.close()
+        
+        # Generate voltage comparison plot
+        print("Generating voltage comparison plot...")
+        plt.figure(figsize=(12, 6))
+        plt.plot(time_log, bus_voltage_log, label='Supply Voltage (V)', color='blue', linewidth=0.8)
+        plt.plot(time_log, [total_voltage_required for total_voltage_required in [bemf + q * 15 for bemf, q in zip(bemf_readings, current_readings)]], label='Total Required Voltage (V)', color='red', linewidth=0.8)
+        plt.xlabel('Time (s)', fontsize=12)
+        plt.ylabel('Voltage (V)', fontsize=12)
+        plt.title(f'Supply Voltage vs Required Voltage - {DESIRED_MAX_CURRENT}A Hold Test', fontsize=14)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # Save voltage comparison plot
+        voltage_plot_filename = f"{timestamp}_{DESIRED_MAX_CURRENT}A_voltage_comparison_plot.png"
+        plt.savefig(voltage_plot_filename, dpi=150)
+        print(f"Voltage comparison plot saved to: {voltage_plot_filename}")
+        plt.close()
+        
         print(f"\nAll data saved:")
         print(f"  - CSV: {csv_filename}")
         print(f"  - Summary: {summary_filename}")
         print(f"  - Plot: {plot_filename}")
+        print(f"  - BEMF Plot: {bemf_plot_filename}")
+        print(f"  - Voltage Comparison Plot: {voltage_plot_filename}")
     else:
         print("Data discarded. No files saved.")
 

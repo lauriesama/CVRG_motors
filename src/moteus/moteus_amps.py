@@ -9,7 +9,9 @@ import math
 import csv
 from datetime import datetime
 import matplotlib.pyplot as plt
+import numpy as np
 import os
+import motor_kv
 
 async def wait_for_cooldown(controller, max_temp=30.0, check_interval=2.0):
     """
@@ -269,8 +271,8 @@ async def main():
     
     # Test range configuration
     START_CURRENT = 1    # Starting current in Amps
-    END_CURRENT = 9      # Ending current in Amps
-    STEP_CURRENT = 1     # Increment in Amps
+    END_CURRENT = 4      # Ending current in Amps
+    STEP_CURRENT = 0.5    # Increment in Amps
     
     # Test duration for each current level
     DURATION = 5        # seconds
@@ -279,9 +281,7 @@ async def main():
     MAX_TEMP_BEFORE_TEST = 30.0  # °C - motor must be below this to start next test
     
     # Motor constants from calibration
-    MOTOR_KT_GL40 = 63.587219136045626  # RPM/V
-    MOTOR_KT_GL60 = 21.672020187243888
-    MOTOR_KV = MOTOR_KT_GL60
+    MOTOR_KV = motor_kv.MOTOR_KV_GB54_2  # RPM/V - adjust based on your motor
     
     # Output directory
     OUTPUT_DIR = "moteus_current_tests"
@@ -367,19 +367,46 @@ async def main():
         
         for data in all_test_data:
             label = f"{data['current_amps']}A"
+            times = np.array(data['time_log'])
+            temps = np.array(data['motor_temperature_readings'])
             
             # Current vs time
-            ax1.plot(data['time_log'], data['current_readings'], label=label, linewidth=1.5)
+            ax1.plot(times, data['current_readings'], label=label, linewidth=1.5)
             
-            # Temperature vs time
-            ax2.plot(data['time_log'], data['motor_temperature_readings'], label=label, linewidth=1.5)
+            # Temperature vs time - raw data
+            line = ax2.plot(times, temps, label=label, linewidth=1.5, alpha=0.7)
+            line_color = line[0].get_color()
+
+            # --- Linear fit on the SECOND HALF of the temperature data ---
+            half_idx = len(times) // 2
+            t_half = times[half_idx:]
+            T_half = temps[half_idx:]
+
+            if len(t_half) > 1:
+                slope, intercept = np.polyfit(t_half, T_half, 1)
+                fit_line = slope * t_half + intercept
+                ax2.plot(
+                    t_half, fit_line,
+                    color=line_color,
+                    linewidth=2.5,
+                    linestyle='--',
+                    label=f"{data['current_amps']}A fit ({slope:.3f}°C/s)"
+                )
             
             # Duty cycle vs time
-            ax3.plot(data['time_log'], [d*100 for d in data['duty_cycle_log']], label=label, linewidth=1.5)
+            ax3.plot(times, [d*100 for d in data['duty_cycle_log']], label=label, linewidth=1.5)
             
             # Torque vs time
-            ax4.plot(data['time_log'], data['torque_readings'], label=label, linewidth=1.5)
+            ax4.plot(times, data['torque_readings'], label=label, linewidth=1.5)
         
+        # Add vertical line at halfway point on temp plot to show fit region
+        total_duration = max(d['time_log'][-1] for d in all_test_data)
+        ax2.axvline(
+            x=total_duration / 2,
+            color='black', linestyle=':', linewidth=1.2, alpha=0.5,
+            label='Fit start (50%)'
+        )
+
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Current (A)')
         ax1.set_title('Q-axis Current Comparison')
@@ -388,9 +415,11 @@ async def main():
         
         ax2.set_xlabel('Time (s)')
         ax2.set_ylabel('Temperature (°C)')
-        ax2.set_title('Motor Temperature Comparison')
+        ax2.set_title('Motor Temperature Comparison\n(dashed = linear fit on 2nd half)')
         ax2.grid(True, alpha=0.3)
-        ax2.legend()
+        # Build a cleaner legend - group raw and fit lines by current
+        handles, labels = ax2.get_legend_handles_labels()
+        ax2.legend(handles, labels, fontsize=7, ncol=2, loc='upper left')
         
         ax3.set_xlabel('Time (s)')
         ax3.set_ylabel('Duty Cycle (%)')
@@ -413,12 +442,12 @@ async def main():
         # Generate summary statistics table
         summary_table = os.path.join(session_dir, f"{session_timestamp}_summary_table.txt")
         with open(summary_table, 'w') as f:
-            f.write("=" * 120 + "\n")
+            f.write("=" * 140 + "\n")
             f.write("CURRENT RANGE TEST SUMMARY\n")
-            f.write("=" * 120 + "\n\n")
-            f.write(f"{'Current':<10} {'Peak I':<10} {'Avg I':<10} {'Peak T':<10} {'ΔT':<10} {'Peak Duty':<12} {'Avg Duty':<12} {'Peak Torque':<12}\n")
-            f.write(f"{'(A)':<10} {'(A)':<10} {'(A)':<10} {'(°C)':<10} {'(°C)':<10} {'(%)':<12} {'(%)':<12} {'(Nm)':<12}\n")
-            f.write("-" * 120 + "\n")
+            f.write("=" * 140 + "\n\n")
+            f.write(f"{'Current':<10} {'Peak I':<10} {'Avg I':<10} {'Peak T':<10} {'ΔT':<10} {'Peak Duty':<12} {'Avg Duty':<12} {'Peak Torque':<12} {'Temp Rate':<14}\n")
+            f.write(f"{'(A)':<10} {'(A)':<10} {'(A)':<10} {'(°C)':<10} {'(°C)':<10} {'(%)':<12} {'(%)':<12} {'(Nm)':<12} {'(°C/s, 2nd½)':<14}\n")
+            f.write("-" * 140 + "\n")
             
             for data in all_test_data:
                 peak_i = max(data['current_readings'])
@@ -429,9 +458,15 @@ async def main():
                 avg_duty = sum(data['duty_cycle_log']) / len(data['duty_cycle_log']) * 100
                 peak_torque = max(data['torque_readings'])
                 
-                f.write(f"{data['current_amps']:<10.2f} {peak_i:<10.3f} {avg_i:<10.3f} {peak_temp:<10.1f} {delta_temp:<10.1f} {peak_duty:<12.1f} {avg_duty:<12.1f} {peak_torque:<12.3f}\n")
+                # Linear fit on second half for temp rate
+                times = np.array(data['time_log'])
+                temps = np.array(data['motor_temperature_readings'])
+                half_idx = len(times) // 2
+                slope, _ = np.polyfit(times[half_idx:], temps[half_idx:], 1)
+                
+                f.write(f"{data['current_amps']:<10.2f} {peak_i:<10.3f} {avg_i:<10.3f} {peak_temp:<10.1f} {delta_temp:<10.1f} {peak_duty:<12.1f} {avg_duty:<12.1f} {peak_torque:<12.3f} {slope:<14.4f}\n")
             
-            f.write("=" * 120 + "\n")
+            f.write("=" * 140 + "\n")
         
         print(f"Summary table saved to: {summary_table}")
     
